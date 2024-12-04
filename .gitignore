@@ -1,2 +1,8 @@
 /experimental_notebooks
 /FusedDataset
+/src/visualizations
+/src/logs
+/src/checkpoints
+/src/_pycache_
+/patchwise_project
+/src/full_framework.py

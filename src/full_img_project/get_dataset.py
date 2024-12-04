@@ -26,17 +26,14 @@ class FusionDataset:
         self.image_groups = []
         self.size = size
         
-        # Iterate through each patient/directory
         for p in os.listdir(basedir):
             level_0_dir = f"{basedir}/{p}/FusedImages_Level_0"
             if not os.path.exists(level_0_dir):
                 continue
                 
-            # Get number of levels for this patient
             num_levels = sum(1 for d in os.listdir(f"{basedir}/{p}") 
                            if d.startswith("FusedImages_Level_"))
             
-            # Process each base image
             for base_idx in range(len(os.listdir(level_0_dir))):
                 paths = []
                 names = []
@@ -58,7 +55,6 @@ class FusionDataset:
                     name = f"Fused_Image_Level_{level}_{current_idx}.tif"
                     path = f"{basedir}/{p}/FusedImages_Level_{level}/{name}"
                     
-                    # Check if this path exists
                     if not os.path.exists(path):
                         valid_group = False
                         break
@@ -66,17 +62,15 @@ class FusionDataset:
                     paths.append(path)
                     names.append(name)
                 
-                # Only add complete groups
                 if valid_group:
                     self.image_groups.append((paths, names))
 
     def _apply_transform(self, img):
-        """Applies the transformation pipeline to an image."""
-        img = Image.fromarray(img)  # Convert NumPy array to PIL Image
-        img = self.transform(img)  # Apply transformation (e.g., ToTensor)
-        img = img.unsqueeze(0)  # Add batch dimension
+        img = Image.fromarray(img)  
+        img = self.transform(img)  
+        img = img.unsqueeze(0)  
         #img = F.interpolate(img, size=(128, 128), mode="bilinear", align_corners=False)
-        img = img.squeeze(0)  # Remove batch dimension
+        img = img.squeeze(0)  
         return img
     
     def __len__(self):
@@ -87,22 +81,18 @@ class FusionDataset:
         images = []
         
         for path in paths:
-            # Read image
             img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
             if img is None:
                 raise ValueError(f"Failed to load image: {path}")
                 
-            # Apply transform
             img = self._apply_transform(img)
             images.append(img)
         
-        # Stack images along a new dimension
         stacked_images = torch.stack(images)
         
         return [stacked_images, names]  # Return both images and names
     
-def get_dataset(size=512):
-    basedir = "../FusedDataset"
+def get_dataset(basedir = "../FusedDataset", size=512):
 
     dataset = FusionDataset(basedir, size=size)
 

@@ -172,7 +172,6 @@ def fusion_loss_v3(outputs, targets, lambda_levels=0.5, lambda_edge=0.1, lambda_
         ssim_val = ssim(pred, target, data_range=max(1.0, torch.max(target)-torch.min(target)), size_average=True)
         ssim_losses.append(1 - ssim_val)
         
-        # Contrast matching loss
         pred_contrast = compute_contrast(pred)
         target_contrast = compute_contrast(target)
         
@@ -181,7 +180,6 @@ def fusion_loss_v3(outputs, targets, lambda_levels=0.5, lambda_edge=0.1, lambda_
                         F.mse_loss(pred_contrast[2], target_contrast[2]))   # Standard deviation
         contrast_losses.append(contrast_loss)
     
-    # Average all losses
     level_loss = sum(level_losses) / len(level_losses)
     edge_loss = sum(edge_losses) / len(edge_losses)
     ssim_loss = sum(ssim_losses) / len(ssim_losses)
@@ -215,96 +213,83 @@ def fusion_loss_v3(outputs, targets, lambda_levels=0.5, lambda_edge=0.1, lambda_
     
     return total_loss
 
-class OCTASpeckleBlock(nn.Module):
-    def __init__(self, num_channels, kernel_size=3):
-        super().__init__()
-        self.kernel_size = kernel_size
+def fusion_loss_v3_fixed(outputs, targets, lambda_final=0.4, lambda_levels=0.2, lambda_edge=0.1, lambda_ssim=0.2, lambda_contrast=0.1):
+    """Fixed loss function with properly weighted components"""
+    level_losses = []
+    edge_losses = []
+    ssim_losses = []
+    contrast_losses = []
+    
+    sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32).view(1, 1, 3, 3).cuda()
+    sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=torch.float32).view(1, 1, 3, 3).cuda()
+    
+    def compute_contrast(x):
+        mean_local = F.avg_pool2d(x, kernel_size=3, stride=1, padding=1)
+        variance = F.avg_pool2d((x - mean_local) ** 2, kernel_size=3, stride=1, padding=1)
         
-        self.speckle_conv = nn.Sequential(
-            nn.Conv2d(num_channels, num_channels, 3, padding=1),
-            nn.InstanceNorm2d(num_channels),
-            nn.PReLU()
-        )
+        mean_global = torch.mean(x)
+        std_global = torch.std(x)
         
-        self.decorr_conv = nn.Sequential(
-            nn.Conv2d(num_channels, num_channels, 3, padding=1),
-            nn.InstanceNorm2d(num_channels),
-            nn.PReLU()
-        )
+        return variance, mean_global, std_global
+    
+    for i, pred in enumerate(outputs['level_outputs']):
+        target = targets[:, i, :, :, :]
         
-        self.intensity_detect = nn.Sequential(
-            nn.Conv2d(num_channels, 1, 1),
-            nn.Sigmoid()
-        )
+        level_losses.append(F.mse_loss(pred, target))
         
-        self.gate = nn.Sequential(
-            nn.Conv2d(num_channels * 2, num_channels, 1),
-            nn.Sigmoid()
-        )
+        pred_edges_x = F.conv2d(pred, sobel_x, padding=1)
+        pred_edges_y = F.conv2d(pred, sobel_y, padding=1)
+        target_edges_x = F.conv2d(target, sobel_x, padding=1)
+        target_edges_y = F.conv2d(target, sobel_y, padding=1)
         
-    def compute_decorrelation(self, x1, x2):
-        decorr = (x1 - x2)**2 / (x1**2 + x2**2 + 1e-6)
-        return decorr
-
-    def suppress_subtle_noise(self, input_tensor, kernel_size=3):
-        num_channels = input_tensor.size(1)
-
-        # Compute local mean and variance
-        mean_filter = torch.ones((num_channels, 1, kernel_size, kernel_size), 
-                                device=input_tensor.device, dtype=input_tensor.dtype) / (kernel_size ** 2)
-        local_mean = F.conv2d(input_tensor, mean_filter, groups=num_channels, padding=kernel_size // 2)
-        local_variance = F.conv2d(input_tensor ** 2, mean_filter, groups=num_channels, padding=kernel_size // 2) - local_mean ** 2
-
-        # Compute gradient magnitude
-        gradient_x_filter = torch.tensor([[-1, 0, 1]], device=input_tensor.device, dtype=input_tensor.dtype).view(1, 1, 1, 3).repeat(num_channels, 1, 1, 1)
-        gradient_y_filter = torch.tensor([[-1], [0], [1]], device=input_tensor.device, dtype=input_tensor.dtype).view(1, 1, 3, 1).repeat(num_channels, 1, 1, 1)
-
-        # Correct padding for gradients
-        gradient_x = F.conv2d(input_tensor, gradient_x_filter, groups=num_channels, padding=(0, 1))  # Horizontal padding
-        gradient_y = F.conv2d(input_tensor, gradient_y_filter, groups=num_channels, padding=(1, 0))  # Vertical padding
-        gradient_magnitude = torch.sqrt(gradient_x ** 2 + gradient_y ** 2)
-
-        # Identify noise based on subtle variance or gradient inconsistencies
-        noise_mask = ((local_variance < local_variance.mean(dim=(2, 3), keepdim=True) * 1.2) & 
-                    (gradient_magnitude < gradient_magnitude.mean(dim=(2, 3), keepdim=True) * 1.2)).float()
-
-        # Suppress subtle noise
-        mean_filter_smoothing = torch.ones((num_channels, 1, kernel_size, kernel_size), 
-                                        device=input_tensor.device, dtype=input_tensor.dtype) / (kernel_size ** 2)
-        smoothed = F.conv2d(input_tensor, mean_filter_smoothing, groups=num_channels, padding=kernel_size // 2)
-        output_tensor = noise_mask * smoothed + (1 - noise_mask) * input_tensor
-
-        return output_tensor
-
-
-    def forward(self, x_sequence):
-        if len(x_sequence) < 2:
-            return self.speckle_conv(x_sequence[0])
-
-        # Detect background regions
-        intensity_mask = self.intensity_detect(x_sequence[-1])
-        background_weight = (3.0 - intensity_mask) ** 2  # Initial suppression
-
-        # Process the current and previous elements
-        current = x_sequence[-1]
-        previous = x_sequence[-2]
-
-        # Compute decorrelation
-        decorrelation = self.compute_decorrelation(current, previous)
-
-        # Suppress subtle noise
-        suppressed = self.suppress_subtle_noise(current, kernel_size=self.kernel_size)
-
-        # Compute speckle features
-        speckle_features = self.speckle_conv(suppressed)
-
-        # Final gating and output
-        gate_value = self.gate(
-            torch.cat([speckle_features, self.decorr_conv(decorrelation)], dim=1)
-        )
-        gate_value = gate_value * (1 + background_weight)
-        return speckle_features * gate_value + current * (1 - gate_value)
-
+        edge_loss = F.mse_loss(pred_edges_x, target_edges_x) + F.mse_loss(pred_edges_y, target_edges_y)
+        edge_losses.append(edge_loss)
+        
+        # SSIM loss
+        ssim_val = ssim(pred, target, data_range=max(1.0, torch.max(target)-torch.min(target)), size_average=True)
+        ssim_losses.append(1 - ssim_val)
+        
+        # Contrast matching loss
+        pred_contrast = compute_contrast(pred)
+        target_contrast = compute_contrast(target)
+        
+        contrast_loss = (F.mse_loss(pred_contrast[0], target_contrast[0]) +  # Local contrast
+                        F.mse_loss(pred_contrast[1], target_contrast[1]) +  # Mean
+                        F.mse_loss(pred_contrast[2], target_contrast[2]))   # Standard deviation
+        contrast_losses.append(contrast_loss)
+    
+    level_loss = sum(level_losses) / len(level_losses)
+    edge_loss = sum(edge_losses) / len(edge_losses)
+    ssim_loss = sum(ssim_losses) / len(ssim_losses)
+    contrast_loss = sum(contrast_losses) / len(contrast_losses)
+    
+    final_output = outputs['final_output']
+    final_target = targets[:, -1, :, :, :]
+    
+    final_loss = F.mse_loss(final_output, final_target)
+    final_ssim_loss = 1 - ssim(final_output, final_target, data_range=1.0, size_average=True)
+    
+    final_pred_contrast = compute_contrast(final_output)
+    final_target_contrast = compute_contrast(final_target)
+    final_contrast_loss = (F.mse_loss(final_pred_contrast[0], final_target_contrast[0]) +
+                          F.mse_loss(final_pred_contrast[1], final_target_contrast[1]) +
+                          F.mse_loss(final_pred_contrast[2], final_target_contrast[2]))
+    
+    detail_loss = F.l1_loss(
+        high_freq_loss(outputs['final_output']), 
+        high_freq_loss(targets[:, -1, :, :, :])
+    )
+    
+    assert abs(lambda_final + lambda_levels + lambda_edge + lambda_ssim + lambda_contrast - 1.0) < 1e-6, \
+        "Lambda coefficients must sum to 1.0"
+    
+    total_loss = (lambda_final * final_loss + 
+                 lambda_levels * level_loss + 
+                 lambda_edge * (edge_loss + detail_loss) + 
+                 lambda_ssim * (ssim_loss + final_ssim_loss) +
+                 lambda_contrast * (contrast_loss + final_contrast_loss))
+    
+    return total_loss
 
 class SequentialProgressiveFusionNetwork(nn.Module):
     def __init__(self, num_fusion_levels=1):
@@ -321,14 +306,8 @@ class SequentialProgressiveFusionNetwork(nn.Module):
             ) for _ in range(num_fusion_levels)
         ])
         
-        # Speckle tracking
-        self.speckle_trackers = nn.ModuleList([
-            OCTASpeckleBlock(self.channels)
-            for _ in range(num_fusion_levels)
-        ])
-        
         # Feature fusion
-        self.fusion_blocks = nn.ModuleList([
+        self.feature_fusion = nn.ModuleList([
             nn.Sequential(
                 nn.Conv2d(self.channels * (i + 2), self.channels, 1),
                 nn.ReLU(),
@@ -360,32 +339,18 @@ class SequentialProgressiveFusionNetwork(nn.Module):
         level_outputs = []
         
         for i in range(self.num_fusion_levels):
-            # Analyze and suppress noise in current features
-            preservation_mask = analyze_structural_features(current_features)
-            current_features = adaptive_noise_suppression(current_features, preservation_mask)
-            
-            # Process speckle features
-            speckle_features = self.speckle_trackers[i](level_features[:i+1])
-            
-            # Also apply noise suppression to speckle features
-            speckle_preservation_mask = analyze_structural_features(speckle_features)
-            speckle_features = adaptive_noise_suppression(speckle_features, speckle_preservation_mask)
-            
-            # Fuse features
+
             if i > 0:
-                fusion_input = torch.cat([speckle_features] + level_features[:i+1], dim=1)
+                fusion_input = torch.cat([current_features] + level_features[:i+1], dim=1)
             else:
-                fusion_input = torch.cat([speckle_features, level_features[0]], dim=1)
+                fusion_input = torch.cat([current_features, level_features[0]], dim=1)
             
-            # Apply fusion block
-            current_features = self.fusion_blocks[i](fusion_input)
+            current_features = self.feature_fusion[i](fusion_input)
             
-            # Generate output
             level_output = self.decoders[i](current_features)
             level_output = self.normalize_output(level_output, input_min, input_max)
             level_outputs.append(level_output)
         
-        # Final fusion
         weights = F.softmax(self.fusion_weights, dim=0)
         final_output = sum(w * out for w, out in zip(weights, level_outputs))
         final_output = self.normalize_output(final_output, input_min, input_max)
@@ -414,11 +379,19 @@ def train_step(model, optimizer, batch):
     outputs = model(batch)
     #print("!")
     # Compute loss
-    loss = fusion_loss_v3(outputs, batch, 
-                          lambda_levels=0.5,
-                          lambda_edge=0.8, 
-                          lambda_ssim=0.8,
-                          lambda_contrast=0.7)
+    loss = fusion_loss_v3_fixed(outputs, batch,
+                           lambda_final=0.4,    # Base MSE loss
+                           lambda_levels=0.2,   # Multi-level reconstruction
+                           lambda_edge=0.1,     # Edge preservation
+                           lambda_ssim=0.2,     # Structural similarity
+                           lambda_contrast=0.1  # Contrast matching
+                           )
+    
+    '''loss = fusion_loss_v4(outputs, batch, 
+                             lambda_cnr=0.3,
+                             lambda_msssim=0.2, 
+                             lambda_edge=0.2,
+                             lambda_contrast=0.2)'''
     #print("!")
     # Backpropagation for training
     if optimizer:
