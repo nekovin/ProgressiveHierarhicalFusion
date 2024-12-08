@@ -20,20 +20,23 @@ import cv2
 from tqdm import tqdm
 
 class FusionDataset:
-    def __init__(self, basedir, size, transform=None):
+    def __init__(self, basedir, size, transform=None, levels=None):
         self.transform = transform if transform else transforms.ToTensor()
         self.transform = transforms.Compose([transforms.Resize(size), transforms.ToTensor()])
         self.image_groups = []
         self.size = size
+        self.levels = levels
         
         for p in os.listdir(basedir):
             level_0_dir = f"{basedir}/{p}/FusedImages_Level_0"
             if not os.path.exists(level_0_dir):
                 continue
                 
-            num_levels = sum(1 for d in os.listdir(f"{basedir}/{p}") 
-                           if d.startswith("FusedImages_Level_"))
-            
+            #num_levels = sum(1 for d in os.listdir(f"{basedir}/{p}") if d.startswith("FusedImages_Level_"))
+
+            num_levels = 6
+
+
             for base_idx in range(len(os.listdir(level_0_dir))):
                 paths = []
                 names = []
@@ -90,7 +93,7 @@ class FusionDataset:
         
         stacked_images = torch.stack(images)
         
-        return [stacked_images, names]  # Return both images and names
+        return [stacked_images, names] 
     
 def get_dataset(basedir = "../FusedDataset", size=512):
 
