@@ -31,10 +31,14 @@ class FusionDataset:
             level_0_dir = f"{basedir}/{p}/FusedImages_Level_0"
             if not os.path.exists(level_0_dir):
                 continue
-                
-            #num_levels = sum(1 for d in os.listdir(f"{basedir}/{p}") if d.startswith("FusedImages_Level_"))
-
-            num_levels = 6
+            
+            if levels is None:
+                num_levels = sum(1 for d in os.listdir(f"{basedir}/{p}") if d.startswith("FusedImages_Level_"))
+            #num_levels = 6
+            else:
+                num_levels = levels
+            
+            print(f"Processing patient {p} with {num_levels} levels")
 
 
             for base_idx in range(len(os.listdir(level_0_dir))):
@@ -52,7 +56,6 @@ class FusionDataset:
                 paths.append(path)
                 names.append(name)
                 
-                # Higher levels
                 for level in range(1, num_levels):
                     current_idx = current_idx // 2
                     name = f"Fused_Image_Level_{level}_{current_idx}.tif"
@@ -95,9 +98,9 @@ class FusionDataset:
         
         return [stacked_images, names] 
     
-def get_dataset(basedir = "../FusedDataset", size=512):
+def get_dataset(basedir = "../FusedDataset", size=512, levels=None):
 
-    dataset = FusionDataset(basedir, size=size)
+    dataset = FusionDataset(basedir, size=size, levels=levels)
 
     return dataset
 
@@ -108,7 +111,7 @@ def get_loaders(dataset):
     train_loader = DataLoader(train_set, batch_size=1, shuffle=True)
     val_loader = DataLoader(val_set, batch_size=1, shuffle=False)
 
-    print(len(train_loader), len(val_loader))
+    #print(len(train_loader), len(val_loader))
 
     return train_loader, val_loader
 
@@ -119,8 +122,8 @@ def visualise_loader(loader):
     fig = plt.figure(figsize=(10, 10))
 
     for i, (images, names) in enumerate(loader):
-        print(images.shape)
-        print(names)
+        #print(images.shape)
+        #print(names)
 
         num_images = images.shape[1]
         images_to_plot = [images[0, j].squeeze(0).numpy() for j in range(num_images)]

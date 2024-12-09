@@ -13,13 +13,11 @@ class ProgressiveFusionUNet(nn.Module):
         self.down1 = Down(base_features, base_features * 2)
         self.down2 = Down(base_features * 2, base_features * 4)
         self.down3 = Down(base_features * 4, base_features * 8)
-        
-        self.fusion_attention = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(base_features * 8, base_features * 8, 1),
-                nn.Sigmoid()
-            ) for _ in range(n_fusion_levels)
-        ])
+
+        self.fusion_attention = nn.Sequential(
+            nn.Conv2d(base_features * 8, base_features * 8, 1),
+            nn.Sigmoid()
+        )
         
         self.up1 = Up(base_features * 8, base_features * 4)
         self.up2 = Up(base_features * 4, base_features * 2)
@@ -32,42 +30,31 @@ class ProgressiveFusionUNet(nn.Module):
         self.softmax = nn.Softmax(dim=0)
 
     def forward(self, x):
-        """
-        Args:
-            x: Input tensor of shape [B, n_fusion_levels, C, H, W]
-        """
-        batch_size = x.shape[0]
-        input_image = x[:, 0, :, :, :]  # original input for residual connection
+        input_image = x
         
-        features_per_level = []
-        for i in range(self.n_fusion_levels):
-            curr_x = x[:, i, :, :, :] 
-            
-            x1 = self.inc(curr_x)
-            x2 = self.down1(x1)
-            x3 = self.down2(x2)
-            x4 = self.down3(x3)
-            
-            x4 = x4 * self.fusion_attention[i](x4)
-            
-            features_per_level.append((x1, x2, x3, x4))
+        # Encoder path
+        x1 = self.inc(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x4 = self.down3(x3)
         
+        # Deep feature refinement with attention
+        x4 = x4 * self.fusion_attention(x4)
+        
+        '''
         norm_weights = self.softmax(self.fusion_weights)
+        x4 = x4 * norm_weights[3]
+        x3 = x3 * norm_weights[2]
+        x2 = x2 * norm_weights[1]
+        x1 = x1 * norm_weights[0]'''
         
-        combined_features = []
-        for i in range(4):
-            weighted_sum = sum(
-                w * features_per_level[j][i] 
-                for j, w in enumerate(norm_weights)
-            )
-            combined_features.append(weighted_sum)
-        
-        x = self.up1(combined_features[3], combined_features[2])
-        x = self.up2(x, combined_features[1])
-        x = self.up3(x, combined_features[0])
+        # Decoder path
+        x = self.up1(x4, x3)
+        x = self.up2(x, x2)
+        x = self.up3(x, x1)
         x = self.outc(x)
-
-        x = x + input_image  # residual connection
+        #x = x + input_image
+        x = 0.8 * x + 0.2 * input_image
         
         return x
 
